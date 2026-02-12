@@ -17,10 +17,35 @@ Including another URLconf
 from django.contrib import admin
 from django.urls import path
 from django.conf import settings
+from django.contrib.auth import views as auth_views
 from django.conf.urls.static import static
+from rest_framework_simplejwt.views import TokenObtainPairView, TokenRefreshView
+from accounts.views import MeView
+
 
 urlpatterns = [
     path('admin/', admin.site.urls),
+
+    path("api/auth/login/", TokenObtainPairView.as_view(), name="token_obtain_pair"),
+    path("api/auth/refresh/", TokenRefreshView.as_view(), name="token_refresh"),
+
+     path(
+        "accounts/set-password/<uidb64>/<token>/",
+        auth_views.PasswordResetConfirmView.as_view(
+            template_name="accounts/set_password.html",
+            success_url="/accounts/password-set-done/",
+        ),
+        name="password_reset_confirm",
+    ),
+    path(
+        "accounts/password-set-done/",
+        auth_views.PasswordResetCompleteView.as_view(
+            template_name="accounts/password_set_done.html",
+        ),
+        name="password_reset_complete",
+    ),
+
+    path("api/me/", MeView.as_view(), name="me"),
 ]
 
 if settings.DEBUG:

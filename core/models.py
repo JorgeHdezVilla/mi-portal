@@ -56,7 +56,7 @@ class Owner(UUIDModel):
     first_name = models.CharField(max_length=80)
     last_name = models.CharField(max_length=120, blank=True, default="")
 
-    email = models.EmailField(blank=True, default="")
+    email = models.EmailField(unique=True)
     phone = models.CharField(max_length=30, blank=True, default="")
     tax_id = models.CharField(max_length=40, blank=True, default="")
 
@@ -74,6 +74,11 @@ class Owner(UUIDModel):
 
     def __str__(self) -> str:
         return f"{self.first_name} {self.last_name}".strip()
+    
+    def save(self, *args, **kwargs):
+        if self.email:
+            self.email = self.email.strip().lower()
+        super().save(*args, **kwargs)
 
 class Unit(UUIDModel):
     residential = models.ForeignKey(
@@ -96,13 +101,13 @@ class Unit(UUIDModel):
     land_m2 = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True)
     construction_m2 = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True)
 
-    owner = models.ForeignKey(
+    owner = models.OneToOneField(
         Owner,
         on_delete=models.PROTECT,
-        related_name="units",
+        related_name="unit",
         null=True,
         blank=True,
-        help_text="Dueño actual (debe pertenecer al mismo residencial)",
+        help_text="Dueño actual (1 unidad por dueño)"
     )
 
     notes = models.TextField(blank=True, default="")
