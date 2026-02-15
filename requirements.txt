@@ -13,6 +13,7 @@ gunicorn==25.0.3
 idna==3.4
 oauthlib==3.2.2
 packaging==26.0
+pillow==12.1.1
 psycopg2==2.9.6
 pycparser==2.21
 PyJWT==2.7.0

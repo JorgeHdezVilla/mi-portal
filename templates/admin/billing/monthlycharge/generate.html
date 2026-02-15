@@ -1,0 +1,19 @@
+{% extends "admin/base_site.html" %}
+{% block content %}
+  <h1>{{ title }}</h1>
+
+  <form method="post" novalidate>
+    {% csrf_token %}
+    <fieldset class="module aligned">
+      {{ form.as_p }}
+    </fieldset>
+    <div class="submit-row">
+      <input type="submit" value="Generar" class="default">
+      <a href="../" class="button">Cancelar</a>
+    </div>
+  </form>
+
+  <p style="margin-top:16px;">
+    Nota: si algún mes no tiene cuota definida (FeeSchedule efectivo antes o en ese mes), ese mes se omite y te muestra warning.
+  </p>
+{% endblock %}

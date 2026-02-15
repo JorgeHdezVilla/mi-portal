@@ -47,7 +47,8 @@ INSTALLED_APPS = [
     # Local apps
     "core",
     "accounts.apps.AccountsConfig",
-    "visits"
+    "visits",
+    "billing",
 ]
 
 REST_FRAMEWORK = {
