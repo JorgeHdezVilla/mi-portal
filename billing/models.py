@@ -1,5 +1,7 @@
 import uuid
 from decimal import Decimal
+from django.db.models import Sum
+
 import os
 
 from django.conf import settings
@@ -262,10 +264,7 @@ def recompute_charge_status(charge: MonthlyCharge):
 
 
 @transaction.atomic
-def approve_payment(payment: PaymentSubmission, reviewer_user):
-    """
-    Aprueba el pago y actualiza status de mensualidades relacionadas.
-    """
+def approve_payment(payment: PaymentSubmission, reviewer_user, auto_allocate: bool = True):
     if payment.status != PaymentStatus.SUBMITTED:
         return
 
@@ -274,7 +273,11 @@ def approve_payment(payment: PaymentSubmission, reviewer_user):
     payment.reviewed_at = timezone.now()
     payment.save(update_fields=["status", "reviewed_by", "reviewed_at"])
 
-    # Recalcular las mensualidades afectadas
+    # ✅ si quieres asignación automática
+    if auto_allocate:
+        auto_allocate_payment(payment)
+
+    # Recalcular estados de mensualidades tocadas (por si había allocations manuales)
     for alloc in payment.allocations.select_related("charge"):
         recompute_charge_status(alloc.charge)
 
@@ -292,3 +295,80 @@ def reject_payment(payment: PaymentSubmission, reviewer_user, notes: str = ""):
     payment.reviewed_at = timezone.now()
     payment.review_notes = notes or payment.review_notes
     payment.save(update_fields=["status", "reviewed_by", "reviewed_at", "review_notes"])
+
+
+def unit_credit_available(unit) -> Decimal:
+    """
+    Crédito disponible = total pagos APPROVED - total allocations (de esos pagos).
+    """
+    payments_sum = (
+        PaymentSubmission.objects
+        .filter(unit=unit, status=PaymentStatus.APPROVED)
+        .aggregate(s=Sum("amount"))["s"] or Decimal("0.00")
+    )
+    alloc_sum = (
+        PaymentAllocation.objects
+        .filter(payment__unit=unit, payment__status=PaymentStatus.APPROVED)
+        .aggregate(s=Sum("amount_applied"))["s"] or Decimal("0.00")
+    )
+    return max(payments_sum - alloc_sum, Decimal("0.00"))
+
+
+@transaction.atomic
+def auto_allocate_payment(payment: PaymentSubmission):
+    """
+    Distribuye el monto del payment a mensualidades (charges) de la misma unidad,
+    empezando por las más antiguas, llenando balances.
+    No toca payments no aprobados.
+    """
+    if payment.status != PaymentStatus.APPROVED:
+        return
+
+    # cuánto de este payment ya fue asignado
+    already_allocated = (
+        payment.allocations.aggregate(s=Sum("amount_applied"))["s"] or Decimal("0.00")
+    )
+    remaining = payment.amount - already_allocated
+    if remaining <= 0:
+        return
+
+    # Cargos pendientes/parciales, más antiguos primero
+    charges = (
+        MonthlyCharge.objects
+        .filter(unit=payment.unit, residential=payment.residential)
+        .exclude(status=ChargeStatus.VOID)
+        .exclude(status=ChargeStatus.PAID)
+        .order_by("period")
+    )
+
+    for charge in charges:
+        if remaining <= 0:
+            break
+
+        balance = charge.balance  # amount - allocated(approved)
+        if balance <= 0:
+            continue
+
+        to_apply = balance if remaining >= balance else remaining
+
+        # crear o actualizar allocation (si el admin ya puso algo manualmente)
+        alloc, created = PaymentAllocation.objects.get_or_create(
+            payment=payment,
+            charge=charge,
+            defaults={"amount_applied": to_apply},
+        )
+        if not created:
+            alloc.amount_applied = alloc.amount_applied + to_apply
+            alloc.save(update_fields=["amount_applied"])
+
+        remaining -= to_apply
+
+        # recalcular estado del charge
+        recompute_charge_status(charge)
+
+
+class PaymentSubmissionApproval(PaymentSubmission):
+    class Meta:
+        proxy = True
+        verbose_name = "Aprobación de pago"
+        verbose_name_plural = "Aprobaciones de pagos"

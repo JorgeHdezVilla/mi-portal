@@ -1,0 +1,20 @@
+{% extends "admin/change_form.html" %}
+
+{% block submit_buttons_bottom %}
+  <div class="submit-row">
+    {% if original and original.status == "SUBMITTED" %}
+      <a class="button default"
+         href="{% url 'admin:billing_paymentsubmissionapproval_approve' original.pk %}">
+        Aprobar
+      </a>
+      <a class="button deletelink" style="margin-left:8px;"
+         href="{% url 'admin:billing_paymentsubmissionapproval_reject' original.pk %}">
+        Rechazar
+      </a>
+    {% else %}
+      <p style="margin:0;padding:8px 0;">Este pago ya fue procesado.</p>
+    {% endif %}
+  </div>
+{% endblock %}
+
+{% block submit_buttons_top %}{% endblock %}

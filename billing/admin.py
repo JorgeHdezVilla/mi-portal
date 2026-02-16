@@ -1,29 +1,34 @@
-from django.contrib import admin, messages
+from datetime import date
+
 from django import forms
+from django.contrib import admin, messages
+from django.shortcuts import get_object_or_404, redirect
+from django.template.response import TemplateResponse
+from django.urls import path
 from django.utils import timezone
+
+from core.models import Residential, Unit, Owner
 
 from .models import (
     FeeSchedule,
     MonthlyCharge,
     PaymentSubmission,
     PaymentAllocation,
+    PaymentSubmissionApproval,  # proxy
+    ChargeStatus,
     PaymentStatus,
     approve_payment,
     reject_payment,
 )
 
-from core.models import Residential, Unit, Owner
 
-from datetime import date
-from django.urls import path
-from django.shortcuts import redirect
-from django.template.response import TemplateResponse
-
-from .models import FeeSchedule, MonthlyCharge, ChargeStatus
-from core.models import Unit
-
+# ---------------- Helpers ----------------
 
 def _user_residential(request):
+    """
+    Devuelve el Residential del admin residencial.
+    Superuser -> None (ve todo).
+    """
     if request.user.is_superuser:
         return None
     profile = getattr(request.user, "staff_residential_profile", None)
@@ -38,6 +43,11 @@ class ResidentialScopedAdmin(admin.ModelAdmin):
     """
 
     def has_module_permission(self, request):
+        if request.user.is_superuser:
+            return True
+        return request.user.is_staff and _user_residential(request) is not None
+
+    def has_add_permission(self, request):
         if request.user.is_superuser:
             return True
         return request.user.is_staff and _user_residential(request) is not None
@@ -74,10 +84,13 @@ class ResidentialScopedAdmin(admin.ModelAdmin):
             return self.has_module_permission(request)
         return self._obj_allowed(request, obj)
 
-    def has_add_permission(self, request):
-        if request.user.is_superuser:
-            return True
-        return request.user.is_staff and _user_residential(request) is not None
+    def formfield_for_foreignkey(self, db_field, request, **kwargs):
+        # Staff: filtrar Residential a solo su residential
+        if db_field.name == "residential" and not request.user.is_superuser:
+            res = _user_residential(request)
+            if res is not None:
+                kwargs["queryset"] = Residential.objects.filter(pk=res.pk)
+        return super().formfield_for_foreignkey(db_field, request, **kwargs)
 
 
 # ---------------- FeeSchedule ----------------
@@ -91,117 +104,30 @@ class FeeScheduleAdmin(ResidentialScopedAdmin):
 
     def get_fields(self, request, obj=None):
         fields = list(super().get_fields(request, obj))
-        # Staff: ocultar residential (se asigna automáticamente)
-        if not request.user.is_superuser and "residential" in fields:
-            fields.remove("residential")
-        return fields
-
-    def save_model(self, request, obj, form, change):
-        # Staff: forzar residential
-        if not request.user.is_superuser:
-            res = _user_residential(request)
-            if res is not None:
-                obj.residential = res
-        super().save_model(request, obj, form, change)
-
-# ---------------- PaymentAllocation inline ----------------
-
-class PaymentAllocationInline(admin.TabularInline):
-    model = PaymentAllocation
-    extra = 0
-    autocomplete_fields = ("charge",)
-    fields = ("charge", "amount_applied", "created_at")
-    readonly_fields = ("created_at",)
-
-    def formfield_for_foreignkey(self, db_field, request, **kwargs):
-        # Staff: solo permitir asignar charges de su residential
-        if db_field.name == "charge" and not request.user.is_superuser:
-            res = _user_residential(request)
-            if res is not None:
-                kwargs["queryset"] = MonthlyCharge.objects.filter(residential_id=res.pk)
-        return super().formfield_for_foreignkey(db_field, request, **kwargs)
-
-
-# ---------------- PaymentSubmission ----------------
-
-@admin.register(PaymentSubmission)
-class PaymentSubmissionAdmin(ResidentialScopedAdmin):
-    list_display = ("submitted_at", "unit", "owner", "amount", "status", "residential")
-    list_filter = ("residential", "status")
-    search_fields = ("unit__reference", "owner__email", "reference")
-    ordering = ("-submitted_at",)
-
-    inlines = [PaymentAllocationInline]
-
-    actions = ["approve_selected", "reject_selected"]
-
-    readonly_fields = ("submitted_at", "reviewed_at", "reviewed_by")
-
-    def get_fields(self, request, obj=None):
-        fields = list(super().get_fields(request, obj))
         # Staff: ocultar residential (se asigna automático)
         if not request.user.is_superuser and "residential" in fields:
             fields.remove("residential")
         return fields
 
-    def get_queryset(self, request):
-        # select_related para performance + same filtering
-        qs = super().get_queryset(request).select_related("residential", "unit", "owner", "submitted_by", "reviewed_by")
-        return qs
-
-    def formfield_for_foreignkey(self, db_field, request, **kwargs):
-        # Staff: filtrar unit/owner al residential del staff
-        if not request.user.is_superuser:
-            res = _user_residential(request)
-            if res is not None:
-                if db_field.name == "unit":
-                    kwargs["queryset"] = Unit.objects.filter(residential_id=res.pk)
-                if db_field.name == "owner":
-                    kwargs["queryset"] = Owner.objects.filter(residential_id=res.pk)
-                if db_field.name == "residential":
-                    kwargs["queryset"] = Residential.objects.filter(pk=res.pk)
-
-        return super().formfield_for_foreignkey(db_field, request, **kwargs)
-
     def save_model(self, request, obj, form, change):
-        # Staff: forzar residential y marcar reviewer si cambió status manualmente
         if not request.user.is_superuser:
             res = _user_residential(request)
             if res is not None:
                 obj.residential = res
-
         super().save_model(request, obj, form, change)
 
-    @admin.action(description="Aprobar pagos seleccionados")
-    def approve_selected(self, request, queryset):
-        count = 0
-        for p in queryset:
-            if p.status == PaymentStatus.SUBMITTED and self._obj_allowed(request, p):
-                approve_payment(p, request.user)
-                count += 1
-        self.message_user(request, f"Aprobados: {count}", level=messages.SUCCESS)
 
-    @admin.action(description="Rechazar pagos seleccionados")
-    def reject_selected(self, request, queryset):
-        count = 0
-        for p in queryset:
-            if p.status == PaymentStatus.SUBMITTED and self._obj_allowed(request, p):
-                reject_payment(p, request.user, notes="Rechazado desde acción masiva")
-                count += 1
-        self.message_user(request, f"Rechazados: {count}", level=messages.WARNING)
-
+# ---------------- MonthlyCharge + Generador ----------------
 
 def _month_start(d: date) -> date:
     return date(d.year, d.month, 1)
 
 
 def _iter_month_starts(start: date, end: date):
-    """Itera meses (primer día) desde start hasta end (incluyente)."""
     cur = _month_start(start)
     end = _month_start(end)
     while cur <= end:
         yield cur
-        # sumar 1 mes
         if cur.month == 12:
             cur = date(cur.year + 1, 1, 1)
         else:
@@ -209,7 +135,6 @@ def _iter_month_starts(start: date, end: date):
 
 
 def _fee_for_month(residential, period: date):
-    """Obtiene la cuota vigente para ese mes."""
     fs = (
         FeeSchedule.objects
         .filter(residential=residential, effective_from__lte=period)
@@ -231,76 +156,59 @@ class GenerateChargesForm(forms.Form):
 
 
 @admin.register(MonthlyCharge)
-class MonthlyChargeAdmin(admin.ModelAdmin):
+class MonthlyChargeAdmin(ResidentialScopedAdmin):
     list_display = ("period", "unit", "amount", "status", "residential", "created_at")
     list_filter = ("residential", "status", "period")
     search_fields = ("unit__reference", "residential__name", "residential__code")
     ordering = ("-period", "unit__reference")
-
     autocomplete_fields = ("unit",)
 
-    # --- scope por residential (superuser ve todo; staff solo su residential) ---
-    def has_module_permission(self, request):
-        if request.user.is_superuser:
-            return True
-        return request.user.is_staff and _user_residential(request) is not None
+    def get_fields(self, request, obj=None):
+        fields = list(super().get_fields(request, obj))
+        if not request.user.is_superuser and "residential" in fields:
+            fields.remove("residential")
+        return fields
 
-    def get_queryset(self, request):
-        qs = super().get_queryset(request).select_related("unit", "residential")
-        if request.user.is_superuser:
-            return qs
-        res = _user_residential(request)
-        if not request.user.is_staff or res is None:
-            return qs.none()
-        return qs.filter(residential_id=res.pk)
-
-    def has_add_permission(self, request):
-        if request.user.is_superuser:
-            return True
-        return request.user.is_staff and _user_residential(request) is not None
-
-    def has_change_permission(self, request, obj=None):
-        if obj is None:
-            return self.has_module_permission(request)
-        if request.user.is_superuser:
-            return True
-        res = _user_residential(request)
-        return request.user.is_staff and res is not None and obj.residential_id == res.pk
-
-    def has_delete_permission(self, request, obj=None):
-        if request.user.is_superuser:
-            return True
-        if obj is None:
-            return self.has_module_permission(request)
-        res = _user_residential(request)
-        return request.user.is_staff and res is not None and obj.residential_id == res.pk
+    def save_model(self, request, obj, form, change):
+        if not request.user.is_superuser:
+            res = _user_residential(request)
+            if res is not None:
+                obj.residential = res
+        super().save_model(request, obj, form, change)
 
     def formfield_for_foreignkey(self, db_field, request, **kwargs):
-        # Staff: filtrar Unit por su residential
         if db_field.name == "unit" and not request.user.is_superuser:
             res = _user_residential(request)
             if res is not None:
                 kwargs["queryset"] = Unit.objects.filter(residential_id=res.pk)
         return super().formfield_for_foreignkey(db_field, request, **kwargs)
 
-    # --- Custom URL / vista para generar cargos ---
+    # ----- custom URL for generator -----
     def get_urls(self):
         urls = super().get_urls()
         my_urls = [
-            path("generate/", self.admin_site.admin_view(self.generate_view), name="billing_monthlycharge_generate"),
+            path("generate/", self.admin_site.admin_view(self.generate_view),
+                 name="billing_monthlycharge_generate"),
         ]
         return my_urls + urls
 
-    def changelist_view(self, request, extra_context=None):
-        extra_context = extra_context or {}
-        # link al generador arriba en la lista
-        extra_context["generate_url"] = "generate/"
-        return super().changelist_view(request, extra_context=extra_context)
-
     def generate_view(self, request):
-        # Solo staff con residential o superuser
         if not self.has_add_permission(request):
             self.message_user(request, "No tienes permisos para generar cargos.", level=messages.ERROR)
+            return redirect("..")
+
+        # Solo staff residencial (para superuser podemos mejorarlo con selector si quieres)
+        if request.user.is_superuser:
+            self.message_user(
+                request,
+                "Como superuser, genera cargos entrando al admin con un usuario staff-residencial (o dime y te agrego selector de residential).",
+                level=messages.WARNING,
+            )
+            return redirect("..")
+
+        res = _user_residential(request)
+        if res is None:
+            self.message_user(request, "Tu usuario no tiene Residential asignado.", level=messages.ERROR)
             return redirect("..")
 
         if request.method == "POST":
@@ -309,24 +217,8 @@ class MonthlyChargeAdmin(admin.ModelAdmin):
                 start = _month_start(form.cleaned_data["start_month"])
                 end = _month_start(form.cleaned_data["end_month"])
                 if end < start:
-                    self.message_user(request, "El rango es inválido (end < start).", level=messages.ERROR)
+                    self.message_user(request, "Rango inválido (end < start).", level=messages.ERROR)
                     return redirect(".")
-
-                # Determinar residential
-                if request.user.is_superuser:
-                    # Para superuser, opcionalmente podrías pedir residential en el form.
-                    # Por ahora: usa el residential del primer objeto filtrado o bloquea.
-                    self.message_user(
-                        request,
-                        "Como superuser, genera cargos desde el admin de un residencial específico (o dime y te lo dejo con selector).",
-                        level=messages.WARNING,
-                    )
-                    return redirect("..")
-
-                res = _user_residential(request)
-                if res is None:
-                    self.message_user(request, "Tu usuario no tiene Residential asignado.", level=messages.ERROR)
-                    return redirect("..")
 
                 units = Unit.objects.filter(residential_id=res.pk).only("id")
                 if not units.exists():
@@ -360,7 +252,8 @@ class MonthlyChargeAdmin(admin.ModelAdmin):
                     extra = "" if len(missing_fee_months) <= 12 else f" (+{len(missing_fee_months)-12} más)"
                     self.message_user(
                         request,
-                        f"⚠️ No se generaron cargos en meses sin cuota definida: {months}{extra}. Crea FeeSchedule con effective_from para esos meses.",
+                        f"⚠️ Meses sin cuota definida (no se generaron): {months}{extra}. "
+                        f"Crea FeeSchedule con effective_from para cubrir esos meses.",
                         level=messages.WARNING,
                     )
 
@@ -371,7 +264,6 @@ class MonthlyChargeAdmin(admin.ModelAdmin):
                 )
                 return redirect("..")
         else:
-            # default: año actual completo
             today = timezone.now().date()
             form = GenerateChargesForm(initial={
                 "start_month": date(today.year, 1, 1),
@@ -384,3 +276,177 @@ class MonthlyChargeAdmin(admin.ModelAdmin):
             form=form,
         )
         return TemplateResponse(request, "admin/billing/monthlycharge/generate.html", context)
+
+
+# ---------------- PaymentAllocation Inline ----------------
+
+class PaymentAllocationInline(admin.TabularInline):
+    model = PaymentAllocation
+    extra = 0
+    autocomplete_fields = ("charge",)
+    fields = ("charge", "amount_applied", "created_at")
+    readonly_fields = ("created_at",)
+
+    def formfield_for_foreignkey(self, db_field, request, **kwargs):
+        # Staff: solo charges del residential
+        if db_field.name == "charge" and not request.user.is_superuser:
+            res = _user_residential(request)
+            if res is not None:
+                kwargs["queryset"] = MonthlyCharge.objects.filter(residential_id=res.pk)
+        return super().formfield_for_foreignkey(db_field, request, **kwargs)
+
+
+# ---------------- PaymentSubmission (CRUD normal) ----------------
+
+@admin.register(PaymentSubmission)
+class PaymentSubmissionAdmin(ResidentialScopedAdmin):
+    """
+    CRUD normal (crear/editar).
+    Aquí NO ponemos vista especial: es el CRUD.
+    """
+    list_display = ("submitted_at", "unit", "owner", "amount", "status", "residential")
+    list_filter = ("residential", "status")
+    search_fields = ("unit__reference", "owner__email", "reference")
+    ordering = ("-submitted_at",)
+
+    inlines = [PaymentAllocationInline]
+
+    autocomplete_fields = ("unit", "owner", "submitted_by", "reviewed_by")
+
+    def get_fields(self, request, obj=None):
+        fields = list(super().get_fields(request, obj))
+
+        # ✅ ocultar campos que se asignan automáticos
+        for f in ["submitted_by", "owner", "reviewed_by", "reviewed_at"]:
+            if f in fields:
+                fields.remove(f)
+
+        # Staff: ocultar residential (se asigna automático)
+        if not request.user.is_superuser and "residential" in fields:
+            fields.remove("residential")
+
+        return fields
+
+    def save_model(self, request, obj, form, change):
+        # Staff: forzar residential
+        if not request.user.is_superuser:
+            res = _user_residential(request)
+            if res is not None:
+                obj.residential = res
+
+        # ✅ submitted_by automático al crear
+        if not change and not obj.submitted_by_id:
+            obj.submitted_by = request.user
+
+        # ✅ owner automático basado en la unit seleccionada
+        # (se guarda como historial; aunque cambie el owner futuro, este pago queda ligado al owner de ese momento)
+        if obj.unit_id:
+            # asegúrate de tener select_related en queryset si quieres, pero aquí funciona igual
+            unit_owner_id = obj.unit.owner_id
+            if not unit_owner_id:
+                raise ValidationError("La unidad seleccionada no tiene dueño asignado. Asigna un Owner a la Unit primero.")
+            obj.owner_id = unit_owner_id
+
+        super().save_model(request, obj, form, change)
+        
+    def formfield_for_foreignkey(self, db_field, request, **kwargs):
+        if not request.user.is_superuser:
+            res = _user_residential(request)
+            if res is not None:
+                if db_field.name == "unit":
+                    kwargs["queryset"] = Unit.objects.filter(residential_id=res.pk)
+                if db_field.name == "owner":
+                    kwargs["queryset"] = Owner.objects.filter(residential_id=res.pk)
+                if db_field.name == "residential":
+                    kwargs["queryset"] = Residential.objects.filter(pk=res.pk)
+        return super().formfield_for_foreignkey(db_field, request, **kwargs)
+
+
+# ---------------- PaymentSubmissionApproval (vista adicional solo aprobar) ----------------
+
+class PaymentAllocationInlineReadOnly(admin.TabularInline):
+    model = PaymentAllocation
+    extra = 0
+    fields = ("charge", "amount_applied", "created_at")
+    readonly_fields = ("charge", "amount_applied", "created_at")
+    can_delete = False
+
+    def has_add_permission(self, request, obj=None):
+        return False
+
+
+@admin.register(PaymentSubmissionApproval)
+class PaymentSubmissionApprovalAdmin(ResidentialScopedAdmin):
+    """
+    Menú adicional: Aprobaciones de pagos.
+    - lista solo SUBMITTED
+    - solo lectura
+    - botones Aprobar/Rechazar
+    """
+    change_form_template = "admin/billing/paymentsubmissionapproval/change_form.html"
+
+    list_display = ("submitted_at", "unit", "owner", "amount", "status", "residential")
+    list_filter = ("residential",)
+    search_fields = ("unit__reference", "owner__email", "reference")
+    ordering = ("-submitted_at",)
+
+    inlines = [PaymentAllocationInlineReadOnly]
+
+    def get_queryset(self, request):
+        qs = super().get_queryset(request).select_related("residential", "unit", "owner")
+        return qs.filter(status=PaymentStatus.SUBMITTED)  # 👈 SOLO pendientes
+
+    def has_add_permission(self, request):
+        return False
+
+    def has_delete_permission(self, request, obj=None):
+        return False
+
+    def get_readonly_fields(self, request, obj=None):
+        return [f.name for f in PaymentSubmission._meta.fields]
+
+    def response_change(self, request, obj):
+        self.message_user(request, "Esta vista es solo para aprobar/rechazar. Usa los botones.", level=messages.WARNING)
+        return redirect(".")
+
+    def get_urls(self):
+        urls = super().get_urls()
+        my_urls = [
+            path("<path:object_id>/approve/",
+                 self.admin_site.admin_view(self.approve_view),
+                 name="billing_paymentsubmissionapproval_approve"),
+            path("<path:object_id>/reject/",
+                 self.admin_site.admin_view(self.reject_view),
+                 name="billing_paymentsubmissionapproval_reject"),
+        ]
+        return my_urls + urls
+
+    def approve_view(self, request, object_id):
+        payment = get_object_or_404(PaymentSubmission, pk=object_id)
+
+        if not self._obj_allowed(request, payment):
+            self.message_user(request, "No tienes permiso para aprobar este pago.", level=messages.ERROR)
+            return redirect("../../")
+
+        if payment.status != PaymentStatus.SUBMITTED:
+            self.message_user(request, "Este pago ya fue procesado.", level=messages.WARNING)
+            return redirect("../")
+
+        approve_payment(payment, request.user, auto_allocate=True)
+        self.message_user(request, "✅ Pago aprobado y auto-asignado.", level=messages.SUCCESS)
+        return redirect("../")
+
+    def reject_view(self, request, object_id):
+        payment = get_object_or_404(PaymentSubmission, pk=object_id)
+
+        if not self._obj_allowed(request, payment):
+            self.message_user(request, "No tienes permiso para rechazar este pago.", level=messages.ERROR)
+            return redirect("../../")
+
+        if payment.status != PaymentStatus.SUBMITTED:
+            self.message_user(request, "Este pago ya fue procesado.", level=messages.WARNING)
+            return redirect("../")
+
+        reject_payment(payment, request.user, notes="Rechazado desde Aprobaciones")
+        self.message_user(request, "❌ Pago rechazado.", level=messages.WARNING)
+        return redirect("../")
