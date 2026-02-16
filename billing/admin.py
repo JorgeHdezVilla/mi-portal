@@ -21,6 +21,8 @@ from .models import (
     reject_payment,
 )
 
+from billing.services import apply_available_credit_to_charge
+
 
 # ---------------- Helpers ----------------
 
@@ -144,15 +146,45 @@ def _fee_for_month(residential, period: date):
     return fs.amount if fs else None
 
 
+from datetime import date
+from django import forms
+from django.utils import timezone
+
+
+MONTH_CHOICES = [
+    (1, "Enero"), (2, "Febrero"), (3, "Marzo"), (4, "Abril"),
+    (5, "Mayo"), (6, "Junio"), (7, "Julio"), (8, "Agosto"),
+    (9, "Septiembre"), (10, "Octubre"), (11, "Noviembre"), (12, "Diciembre"),
+]
+
+
 class GenerateChargesForm(forms.Form):
-    start_month = forms.DateField(
-        help_text="Primer día del mes (ej: 2026-01-01)",
-        widget=forms.DateInput(attrs={"type": "date"})
-    )
-    end_month = forms.DateField(
-        help_text="Primer día del mes (ej: 2026-12-01)",
-        widget=forms.DateInput(attrs={"type": "date"})
-    )
+    start_year = forms.IntegerField(min_value=2000, max_value=2100, label="Año inicio")
+    start_month = forms.ChoiceField(choices=MONTH_CHOICES, label="Mes inicio")
+
+    end_year = forms.IntegerField(min_value=2000, max_value=2100, label="Año fin")
+    end_month = forms.ChoiceField(choices=MONTH_CHOICES, label="Mes fin")
+    
+
+    def clean(self):
+        cleaned = super().clean()
+        sy = cleaned.get("start_year")
+        sm = cleaned.get("start_month")
+        ey = cleaned.get("end_year")
+        em = cleaned.get("end_month")
+
+        if not (sy and sm and ey and em):
+            return cleaned
+
+        start = date(int(sy), int(sm), 1)
+        end = date(int(ey), int(em), 1)
+
+        if end < start:
+            raise forms.ValidationError("El rango es inválido: fin es menor que inicio.")
+
+        cleaned["start_date"] = start
+        cleaned["end_date"] = end
+        return cleaned
 
 
 @admin.register(MonthlyCharge)
@@ -214,13 +246,13 @@ class MonthlyChargeAdmin(ResidentialScopedAdmin):
         if request.method == "POST":
             form = GenerateChargesForm(request.POST)
             if form.is_valid():
-                start = _month_start(form.cleaned_data["start_month"])
-                end = _month_start(form.cleaned_data["end_month"])
+                start = form.cleaned_data["start_date"]
+                end = form.cleaned_data["end_date"]
                 if end < start:
                     self.message_user(request, "Rango inválido (end < start).", level=messages.ERROR)
                     return redirect(".")
 
-                units = Unit.objects.filter(residential_id=res.pk).only("id")
+                units = Unit.objects.filter(residential_id=res.pk).only("pk")
                 if not units.exists():
                     self.message_user(request, "No hay unidades para generar cargos.", level=messages.WARNING)
                     return redirect("..")
@@ -243,6 +275,7 @@ class MonthlyChargeAdmin(ResidentialScopedAdmin):
                             defaults={"amount": fee, "status": ChargeStatus.PENDING},
                         )
                         if created:
+                            apply_available_credit_to_charge(obj)
                             created_count += 1
                         else:
                             skipped_count += 1
@@ -266,8 +299,10 @@ class MonthlyChargeAdmin(ResidentialScopedAdmin):
         else:
             today = timezone.now().date()
             form = GenerateChargesForm(initial={
-                "start_month": date(today.year, 1, 1),
-                "end_month": date(today.year, 12, 1),
+                "start_year": today.year,
+                "start_month": today.month,
+                "end_year": today.year,
+                "end_month": today.month,
             })
 
         context = dict(
