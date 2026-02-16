@@ -11,10 +11,7 @@ def clean(self):
 
 
 class UUIDModel(models.Model):
-    """
-    Base abstracta para agregar uuid autogenerado a todos los modelos.
-    """
-    uuid = models.UUIDField(default=uuid.uuid4, editable=False, unique=True)
+    uuid = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
 
     class Meta:
         abstract = True
@@ -154,3 +151,10 @@ class StaffResidentialProfile(UUIDModel):
 
     def __str__(self) -> str:
         return f"{self.user.username} -> {self.residential.name}"
+
+
+class UnitBalanceView(Unit):
+    class Meta:
+        proxy = True
+        verbose_name = "Saldo por unidad"
+        verbose_name_plural = "Saldos por unidad"

@@ -434,7 +434,7 @@ class PaymentSubmissionApprovalAdmin(ResidentialScopedAdmin):
 
         approve_payment(payment, request.user, auto_allocate=True)
         self.message_user(request, "✅ Pago aprobado y auto-asignado.", level=messages.SUCCESS)
-        return redirect("../")
+        return redirect("../../")
 
     def reject_view(self, request, object_id):
         payment = get_object_or_404(PaymentSubmission, pk=object_id)
@@ -449,4 +449,4 @@ class PaymentSubmissionApprovalAdmin(ResidentialScopedAdmin):
 
         reject_payment(payment, request.user, notes="Rechazado desde Aprobaciones")
         self.message_user(request, "❌ Pago rechazado.", level=messages.WARNING)
-        return redirect("../")
+        return redirect("../../")

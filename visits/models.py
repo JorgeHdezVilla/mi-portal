@@ -11,7 +11,13 @@ class EntryMethod(models.TextChoices):
     OTHER = "OTHER", "Otro"
 
 
-class VisitPass(models.Model):
+class UUIDModel(models.Model):
+    uuid = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+
+    class Meta:
+        abstract = True
+
+class VisitPass(UUIDModel):
     """
     Un pase de visita creado por un Owner para su Unit.
     El QR debe representar un 'code' único + validaciones (fechas/uso).
@@ -70,7 +76,7 @@ class ScanType(models.TextChoices):
     OUT = "OUT", "Salida"
 
 
-class VisitScan(models.Model):
+class VisitScan(UUIDModel):
     visit_pass = models.ForeignKey(VisitPass, on_delete=models.CASCADE, related_name="scans")
     scan_type = models.CharField(max_length=10, choices=ScanType.choices)
     scanned_at = models.DateTimeField(auto_now_add=True)

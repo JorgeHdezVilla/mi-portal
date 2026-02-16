@@ -2,8 +2,15 @@ from django.db import models
 from django.conf import settings
 from core.models import Owner
 from core.models import Residential
+import uuid
 
-class OwnerAccount(models.Model):
+class UUIDModel(models.Model):
+    uuid = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+
+    class Meta:
+        abstract = True
+        
+class OwnerAccount(UUIDModel):
     user = models.OneToOneField(
         settings.AUTH_USER_MODEL,
         on_delete=models.CASCADE,
@@ -22,7 +29,7 @@ class OwnerAccount(models.Model):
         return f"{self.owner} -> {self.user.email}"
 
 
-class GuardAccount(models.Model):
+class GuardAccount(UUIDModel):
     user = models.OneToOneField(
         settings.AUTH_USER_MODEL,
         on_delete=models.CASCADE,

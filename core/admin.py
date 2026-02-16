@@ -3,6 +3,8 @@ from django import forms
 
 from .models import Residential, Unit, Owner, StaffResidentialProfile
 
+from billing.services import get_unit_balance
+from .models import UnitBalanceView
 
 def _user_residential(request):
     """
@@ -269,3 +271,66 @@ class UnitAdmin(admin.ModelAdmin):
             if res is not None:
                 obj.residential = res
         super().save_model(request, obj, form, change)
+
+
+@admin.register(UnitBalanceView)
+class UnitBalanceViewAdmin(admin.ModelAdmin):
+    """
+    Vista SOLO lectura para ver saldos/créditos por unidad.
+    """
+    list_display = ("reference", "residential", "owner_email", "balance_due", "credit_available", "unpaid_months")
+    list_filter = ("residential",)
+    search_fields = ("reference", "owner__email", "residential__name", "residential__code")
+    ordering = ("residential__name", "reference")
+
+    # Solo lectura
+    def has_add_permission(self, request):
+        return False
+
+    def has_delete_permission(self, request, obj=None):
+        return False
+
+    def has_change_permission(self, request, obj=None):
+        # permitir ver detalle, pero no editar
+        return True
+
+    def get_readonly_fields(self, request, obj=None):
+        return [f.name for f in self.model._meta.fields]
+
+    # --- Scoped por residential (para admin residencial) ---
+    def get_queryset(self, request):
+        qs = super().get_queryset(request).select_related("residential", "owner")
+        if request.user.is_superuser:
+            return qs
+        profile = getattr(request.user, "staff_residential_profile", None)
+        res = getattr(profile, "residential", None)
+        if not request.user.is_staff or res is None:
+            return qs.none()
+        return qs.filter(residential_id=res.pk)
+
+    # --- Columnas de saldo ---
+    def _bal(self, obj):
+        return get_unit_balance(obj)
+
+    def balance_due(self, obj):
+        return self._bal(obj).balance_due
+    balance_due.short_description = "Deuda"
+
+    def credit_available(self, obj):
+        return self._bal(obj).credit_available
+    credit_available.short_description = "Crédito"
+
+    def unpaid_months(self, obj):
+        return self._bal(obj).unpaid_months
+    unpaid_months.short_description = "Meses adeudo"
+
+    def owner_email(self, obj):
+        return getattr(obj.owner, "email", "") if obj.owner_id else ""
+    owner_email.short_description = "Owner email"
+
+    def has_module_permission(self, request):
+        if request.user.is_superuser:
+            return True
+        profile = getattr(request.user, "staff_residential_profile", None)
+        res = getattr(profile, "residential", None)
+        return request.user.is_staff and res is not None
